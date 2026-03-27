@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: tradingbot
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: bash start.sh
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.13.5
+      - key: DART_API_KEY
+        sync: false
