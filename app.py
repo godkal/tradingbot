@@ -21,8 +21,9 @@ import streamlit as st
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
+
 KST = timezone(timedelta(hours=9))
-PAGE_TITLE = "Premarket Briefing"
+PAGE_TITLE = "장전 단타 브리핑"
 DEFAULT_MIN_SCORE = 63
 DEFAULT_CANDIDATE_COUNT = 3
 DEFAULT_REFRESH_HOURS = 3
@@ -115,8 +116,8 @@ def safe_float(value: Any) -> float:
         return 0.0
 
 
-def clamp(value: float, low: float, high: float) -> float:
-    return max(low, min(value, high))
+def clamp(value: float, lower: float, upper: float) -> float:
+    return max(lower, min(value, upper))
 
 
 def init_db() -> None:
@@ -128,9 +129,9 @@ def init_db() -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 trade_date TEXT NOT NULL,
                 created_at TEXT NOT NULL,
-                candidate_limit INTEGER NOT NULL,
-                min_score REAL NOT NULL,
-                recommended_count INTEGER NOT NULL,
+                candidate_limit INTEGER NOT NULL DEFAULT 3,
+                min_score REAL NOT NULL DEFAULT 63,
+                recommended_count INTEGER NOT NULL DEFAULT 0,
                 payload_json TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS scheduler_runs (
@@ -152,8 +153,9 @@ def save_briefing(payload: dict[str, Any]) -> None:
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
             """
-            INSERT INTO briefings (trade_date, created_at, candidate_limit, min_score, recommended_count, payload_json)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO briefings (
+                trade_date, created_at, candidate_limit, min_score, recommended_count, payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?)
             """,
             (
                 payload["trade_date"],
@@ -161,7 +163,7 @@ def save_briefing(payload: dict[str, Any]) -> None:
                 payload["candidate_limit"],
                 payload["min_score"],
                 len(payload["recommendations"]),
-                json.dumps(payload, ensure_ascii=False),
+                json.dumps(payload, ensure_ascii=True),
             ),
         )
         conn.commit()
@@ -186,8 +188,9 @@ def save_scheduler_run(status: str, started_at: str, finished_at: str | None, me
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
             """
-            INSERT INTO scheduler_runs (job_name, started_at, finished_at, status, message, trade_date, briefing_created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO scheduler_runs (
+                job_name, started_at, finished_at, status, message, trade_date, briefing_created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (JOB_NAME, started_at, finished_at, status, message, trade_date, briefing_created_at),
         )
@@ -204,12 +207,17 @@ def load_latest_scheduler_run() -> dict[str, Any] | None:
     return dict(row) if row else None
 
 
-def build_news_search_url(keyword: str) -> str:
-    return f"https://search.naver.com/search.naver?where=news&query={quote_plus(keyword)}"
-
-
 def google_rss_url(query: str) -> str:
-    return f"https://news.google.com/rss/search?q={quote_plus(query)}&hl=en-US&gl=US&ceid=US:en"
+    return f"https://news.google.com/rss/search?q={quote_plus(query)}&hl=ko&gl=KR&ceid=KR:ko"
+
+
+def keyword_strength(title: str, summary: str) -> float:
+    text = f"{title} {summary}".lower()
+    score = 6.0
+    for keyword in ["order", "contract", "earnings", "approval", "ai", "hbm", "investment", "drug", "supply"]:
+        if keyword in text:
+            score += 0.7
+    return min(score, 9.5)
 
 
 def collect_market_data(limit: int = 60) -> tuple[list[Snapshot], str]:
@@ -245,65 +253,189 @@ def collect_market_data(limit: int = 60) -> tuple[list[Snapshot], str]:
     return [Snapshot(*row) for row in SAMPLE_MARKET_ROWS], "fallback_sample"
 
 
-def keyword_strength(title: str, summary: str) -> float:
-    text = f"{title} {summary}".lower()
-    score = 6.0
-    for keyword in ["order", "contract", "guidance", "approval", "ai", "hbm", "investment", "demand", "supply"]:
-        if keyword in text:
-            score += 0.7
-    return min(score, 9.5)
-
-
 def fetch_news_for_ticker(snapshot: Snapshot, created_at: datetime) -> list[NewsItem]:
     response = requests.get(google_rss_url(f'"{snapshot.name}" when:1d'), headers={"User-Agent": "Mozilla/5.0"}, timeout=8)
     response.raise_for_status()
     root = ET.fromstring(response.text)
-    rows: list[NewsItem] = []
-    for item in root.findall(".//item")[:2]:
-        title = unescape(item.findtext("title", default="")).strip()
+    items: list[NewsItem] = []
+    for row in root.findall(".//item")[:2]:
+        title = unescape(row.findtext("title", default="")).strip()
         if not title:
             continue
-        summary = unescape(item.findtext("description", default="")).strip()
-        pub_date = item.findtext("pubDate", default="")
+        summary = unescape(row.findtext("description", default="")).strip()
+        pub_date = row.findtext("pubDate", default="")
         published_at = parsedate_to_datetime(pub_date) if pub_date else created_at
-        rows.append(
+        items.append(
             NewsItem(
                 title=title,
                 source="Google News RSS",
-                summary=summary or f"News related to {snapshot.name}",
+                summary=summary or f"{snapshot.name} related news",
                 published_at=published_at.astimezone(KST),
                 related_tickers=[snapshot.ticker],
                 news_strength=keyword_strength(title, summary),
-                url=item.findtext("link", default="").strip(),
+                url=row.findtext("link", default="").strip(),
             )
         )
-    return rows
+    return items
 
 
 def collect_news(snapshots: list[Snapshot], max_tickers: int = 15) -> tuple[list[NewsItem], str]:
     created_at = now_kst()
     candidates = snapshots[:max_tickers]
     try:
-        collected: list[NewsItem] = []
+        rows: list[NewsItem] = []
         with ThreadPoolExecutor(max_workers=min(6, len(candidates)) or 1) as executor:
-            futures = [executor.submit(fetch_news_for_ticker, s, created_at) for s in candidates]
+            futures = [executor.submit(fetch_news_for_ticker, item, created_at) for item in candidates]
             for future in as_completed(futures):
                 try:
-                    collected.extend(future.result())
+                    rows.extend(future.result())
                 except Exception:
                     continue
-        if collected:
-            return collected, "actual"
+        if rows:
+            return rows, "actual"
     except Exception:
         pass
     return [
-        NewsItem(title=t, source="Sample", summary=s, published_at=created_at - timedelta(minutes=i * 10), related_tickers=tk, news_strength=n, url=build_news_search_url(t))
-        for i, (t, s, tk, n) in enumerate(SAMPLE_NEWS_ROWS)
+        NewsItem(
+            title=title,
+            source="Sample",
+            summary=summary,
+            published_at=created_at - timedelta(minutes=index * 15),
+            related_tickers=tickers,
+            news_strength=strength,
+            url=f"https://news.google.com/search?q={quote_plus(title)}",
+        )
+        for index, (title, summary, tickers, strength) in enumerate(SAMPLE_NEWS_ROWS)
     ], "fallback_sample"
 
 
-def score_candidates(snapshots: list[Snapshot], news_items: list[NewsItem]) -> list[ScoreRow]:
-    news_map: dict[str, dict[str, Any]] = {}
+def score_snapshot(snapshot: Snapshot, news_strength: float, spread_count: int) -> ScoreRow:
+    material = 0.0
+    reasons: list[str] = []
+    if news_strength >= 9:
+        material += 14
+        reasons.append(f"news bonus 14 from strength {news_strength:.1f}")
+    elif news_strength >= 7.5:
+        material += 10
+        reasons.append(f"news bonus 10 from strength {news_strength:.1f}")
+    elif news_strength >= 6:
+        material += 6
+        reasons.append(f"news bonus 6 from strength {news_strength:.1f}")
+    if spread_count >= 2:
+        material += 5
+        reasons.append(f"spread bonus 5 from {spread_count} articles")
+    elif spread_count == 1:
+        material += 3
+        reasons.append("spread bonus 3 from 1 article")
+    material = clamp(material, 0, 35)
+
+    money = 0.0
+    if snapshot.trading_value >= 50_000_000_000:
+        money += 14
+    elif snapshot.trading_value >= 20_000_000_000:
+        money += 10
+    elif snapshot.trading_value >= 10_000_000_000:
+        money += 6
+    if snapshot.volume >= 3_000_000:
+        money += 8
+    elif snapshot.volume >= 1_000_000:
+        money += 5
+    elif snapshot.volume >= 500_000:
+        money += 3
+    close_position = (snapshot.close_price - snapshot.low_price) / max(snapshot.high_price - snapshot.low_price, 1)
+    if close_position >= 0.82:
+        money += 8
+    elif close_position >= 0.68:
+        money += 5
+    elif close_position >= 0.55:
+        money += 3
+    money = clamp(money, 0, 30)
+
+    retrace = (snapshot.high_price - snapshot.close_price) / max(snapshot.high_price, 1)
+    day_range = (snapshot.high_price - snapshot.low_price) / max(snapshot.close_price, 1)
+    setup = 0.0
+    setup += 9 if retrace <= 0.02 else 7 if retrace <= 0.04 else 4
+    setup += 8 if snapshot.change_rate <= 15 else 5 if snapshot.change_rate <= 20 else 2
+    setup += 8 if day_range <= 0.13 else 6 if day_range <= 0.18 else 3
+    setup = clamp(setup, 0, 25)
+
+    penalty = 0.0
+    notes: list[str] = []
+    if snapshot.change_rate >= 18:
+        penalty += 4
+        notes.append("overheated move")
+    if day_range >= 0.18:
+        penalty += 3
+        notes.append("wide intraday range")
+    if news_strength < 7.5 and snapshot.change_rate >= 10:
+        penalty += 2
+        notes.append("price strength without enough news support")
+    penalty = clamp(penalty, 0, 10)
+
+    total = round(material + money + setup - penalty, 1)
+    return ScoreRow(
+        ticker=snapshot.ticker,
+        ticker_name=snapshot.name,
+        material_score=round(material, 1),
+        money_flow_score=round(money, 1),
+        setup_score=round(setup, 1),
+        risk_penalty=round(penalty, 1),
+        total_score=total,
+        reason_text=f"trading value {snapshot.trading_value / 100_000_000:,.0f}b KRW, total {total:.1f}",
+        score_breakdown={
+            "material_score": round(material, 1),
+            "money_flow_score": round(money, 1),
+            "setup_score": round(setup, 1),
+            "risk_penalty": round(penalty, 1),
+            "news_bonus": 14.0 if news_strength >= 9 else 10.0 if news_strength >= 7.5 else 6.0 if news_strength >= 6 else 0.0,
+            "spread_bonus": 5.0 if spread_count >= 2 else 3.0 if spread_count == 1 else 0.0,
+        },
+        material_reasons=reasons or ["no material bonus"],
+        risk_notes=notes,
+    )
+
+
+def build_plan(score: ScoreRow, snapshot: Snapshot, related_news: list[dict[str, Any]]) -> dict[str, Any]:
+    if score.total_score >= 80:
+        status = "BUY"
+    elif score.total_score >= DEFAULT_MIN_SCORE:
+        status = "WAIT"
+    elif snapshot.change_rate >= 18:
+        status = "NO_CHASE"
+    else:
+        status = "SKIP"
+    buy_min = round(snapshot.close_price * 0.985 / 10) * 10
+    buy_max = round(snapshot.close_price * 1.005 / 10) * 10
+    stop_loss = round(snapshot.low_price * 1.01 / 10) * 10
+    rr = max(buy_max - stop_loss, snapshot.close_price * 0.02)
+    take_profit_1 = round((buy_max + rr * 1.5) / 10) * 10
+    take_profit_2 = round((buy_max + rr * 2.0) / 10) * 10
+    return {
+        "ticker": score.ticker,
+        "ticker_name": score.ticker_name,
+        "plan_type": "Pullback",
+        "status": status,
+        "buy_min": float(buy_min),
+        "buy_max": float(buy_max),
+        "stop_loss": float(stop_loss),
+        "take_profit_1": float(take_profit_1),
+        "take_profit_2": float(take_profit_2),
+        "action_guide": "Wait for stabilization before entry",
+        "reason_text": score.reason_text,
+        "total_score": score.total_score,
+        "score_breakdown": score.score_breakdown,
+        "material_reasons": score.material_reasons,
+        "risk_notes": score.risk_notes,
+        "related_news": related_news[:3],
+    }
+
+
+def generate_briefing(candidate_limit: int, min_score: float) -> dict[str, Any]:
+    trade_date = current_trade_date()
+    snapshots, market_source = collect_market_data()
+    news_items, news_source = collect_news(snapshots)
+    news_by_ticker: dict[str, list[dict[str, Any]]] = {}
+    strength_by_ticker: dict[str, tuple[float, int]] = {}
     for item in news_items:
         payload = {
             "title": item.title,
@@ -312,142 +444,89 @@ def score_candidates(snapshots: list[Snapshot], news_items: list[NewsItem]) -> l
             "published_at": to_storage_time(item.published_at),
             "news_strength": item.news_strength,
             "url": item.url,
+            "related_tickers": item.related_tickers,
         }
         for ticker in item.related_tickers:
-            row = news_map.setdefault(ticker, {"max_strength": 0.0, "count": 0, "items": []})
-            row["max_strength"] = max(row["max_strength"], item.news_strength)
-            row["count"] += 1
-            row["items"].append(payload)
+            news_by_ticker.setdefault(ticker, []).append(payload)
+            max_strength, count = strength_by_ticker.get(ticker, (0.0, 0))
+            strength_by_ticker[ticker] = (max(max_strength, item.news_strength), count + 1)
 
-    result: list[ScoreRow] = []
-    for s in snapshots:
-        n = news_map.get(s.ticker, {"max_strength": 0.0, "count": 0, "items": []})
-        material = clamp((n["max_strength"] * 5.5) + (n["count"] * 1.2), 0, 35)
-        flow = clamp((s.change_rate * 2.4) + min(s.trading_value / 120_000_000_000, 18), 0, 35)
-        intraday_range = ((s.high_price - s.low_price) / s.close_price * 100) if s.close_price > 0 else 0
-        setup = clamp((intraday_range * 1.3) + min(s.volume / 1_800_000, 10), 0, 20)
-        risk = 0.0
-        notes: list[str] = []
-        if s.change_rate > 20:
-            risk += 7.0
-            notes.append("Daily change above 20%")
-        if intraday_range > 18:
-            risk += 5.0
-            notes.append("Intraday range above 18%")
+    scores = []
+    for snapshot in snapshots:
+        max_strength, count = strength_by_ticker.get(snapshot.ticker, (0.0, 0))
+        scores.append(score_snapshot(snapshot, max_strength, count))
+    ordered_scores = sorted(scores, key=lambda item: item.total_score, reverse=True)
 
-        total = clamp(material + flow + setup - risk, 0, 100)
-        reasons: list[str] = []
-        if n["items"]:
-            reasons.append(f"News strength {n['max_strength']:.1f}, {n['count']} item(s)")
-            reasons.extend([x["title"] for x in n["items"][:2]])
-        else:
-            reasons.append("No ticker-linked news in this cycle")
+    selected_scores = [item for item in ordered_scores if item.total_score >= min_score][:candidate_limit]
+    snapshot_map = {item.ticker: item for item in snapshots}
+    recommendations = [build_plan(score, snapshot_map[score.ticker], news_by_ticker.get(score.ticker, [])) for score in selected_scores]
 
-        result.append(
-            ScoreRow(
-                ticker=s.ticker,
-                ticker_name=s.name,
-                material_score=round(material, 2),
-                money_flow_score=round(flow, 2),
-                setup_score=round(setup, 2),
-                risk_penalty=round(risk, 2),
-                total_score=round(total, 2),
-                reason_text=" | ".join(reasons[:3]),
-                score_breakdown={"material": round(material, 2), "flow": round(flow, 2), "setup": round(setup, 2), "risk": round(risk, 2)},
-                material_reasons=reasons,
-                risk_notes=notes,
-            )
-        )
-
-    result.sort(key=lambda x: x.total_score, reverse=True)
-    return result
-
-
-def generate_briefing(candidate_limit: int, min_score: float) -> dict[str, Any]:
-    created = now_kst()
-    trade_date = current_trade_date()
-
-    market_rows, market_mode = collect_market_data(limit=60)
-    news_rows, news_mode = collect_news(market_rows, max_tickers=15)
-    scores = score_candidates(market_rows, news_rows)
-
-    selected = [row for row in scores if row.total_score >= min_score][:candidate_limit]
-
-    recs: list[dict[str, Any]] = []
-    for row in selected:
-        snapshot = next((x for x in market_rows if x.ticker == row.ticker), None)
-        close = snapshot.close_price if snapshot else 0
-        recs.append(
+    review_rows = []
+    for idx, score in enumerate(ordered_scores[:15], start=1):
+        snap = snapshot_map[score.ticker]
+        review_rows.append(
             {
-                "ticker": row.ticker,
-                "ticker_name": row.ticker_name,
-                "total_score": row.total_score,
-                "status": "candidate",
-                "buy_min": round(close * 0.985, 2),
-                "buy_max": round(close * 0.997, 2),
-                "stop_loss": round(close * 0.975, 2),
-                "material_reasons": row.material_reasons,
-                "risk_notes": row.risk_notes,
+                "rank": idx,
+                "ticker": score.ticker,
+                "ticker_name": score.ticker_name,
+                "material_score": score.material_score,
+                "money_flow_score": score.money_flow_score,
+                "setup_score": score.setup_score,
+                "risk_penalty": score.risk_penalty,
+                "total_score": score.total_score,
+                "reason_text": score.reason_text,
+                "score_breakdown": score.score_breakdown,
+                "material_reasons": score.material_reasons,
+                "risk_notes": score.risk_notes,
+                "close_price": snap.close_price,
+                "change_rate": snap.change_rate,
+                "trading_value": snap.trading_value,
+                "matched_news": news_by_ticker.get(score.ticker, [])[:3],
             }
         )
 
     payload = {
         "trade_date": trade_date,
-        "created_at": to_storage_time(created),
+        "created_at": to_storage_time(now_kst()),
         "candidate_limit": candidate_limit,
-        "min_score": float(min_score),
-        "recommendations": recs,
-        "collection_meta": {
-            "market_collection_mode": market_mode,
-            "news_collection_mode": news_mode,
-            "market_rows": len(market_rows),
-            "news_rows": len(news_rows),
-            "refresh_interval_hours": DEFAULT_REFRESH_HOURS,
-        },
+        "min_score": min_score,
+        "recommendations": recommendations,
+        "score_review": review_rows,
+        "excluded_notes": [note for row in ordered_scores for note in row.risk_notes][:5] or ["no exclusion note"],
         "collected_news": [
             {
-                "title": n.title,
-                "source": n.source,
-                "summary": n.summary,
-                "published_at": to_storage_time(n.published_at),
-                "related_tickers": n.related_tickers,
-                "news_strength": n.news_strength,
-                "url": n.url,
+                "title": item.title,
+                "source": item.source,
+                "summary": item.summary,
+                "published_at": to_storage_time(item.published_at),
+                "related_tickers": item.related_tickers,
+                "news_strength": item.news_strength,
+                "url": item.url,
             }
-            for n in news_rows
+            for item in sorted(news_items, key=lambda row: row.published_at, reverse=True)
         ],
-        "score_review": [
-            {
-                "rank": idx + 1,
-                "ticker": s.ticker,
-                "ticker_name": s.ticker_name,
-                "total_score": s.total_score,
-                "material_score": s.material_score,
-                "money_flow_score": s.money_flow_score,
-                "setup_score": s.setup_score,
-                "risk_penalty": s.risk_penalty,
-                "reason_text": s.reason_text,
-                "score_breakdown": s.score_breakdown,
-                "material_reasons": s.material_reasons,
-                "risk_notes": s.risk_notes,
-                "change_rate": next((m.change_rate for m in market_rows if m.ticker == s.ticker), 0.0),
-            }
-            for idx, s in enumerate(scores)
-        ],
+        "logs": {
+            "news_count": len(news_items),
+            "disclosure_count": 0,
+            "analyzed_count": len(ordered_scores),
+            "recommended_count": len(recommendations),
+            "market_source": market_source,
+            "news_source": news_source,
+            "disclosure_source": "disabled",
+        },
     }
-
     save_briefing(payload)
     return payload
 
 
 def run_background_refresh() -> None:
-    started = to_storage_time(now_kst())
+    started_at = now_kst()
     trade_date = current_trade_date()
     try:
-        briefing = generate_briefing(DEFAULT_CANDIDATE_COUNT, DEFAULT_MIN_SCORE)
-        save_scheduler_run("success", started, to_storage_time(now_kst()), "briefing refreshed", trade_date, briefing.get("created_at"))
+        payload = generate_briefing(DEFAULT_CANDIDATE_COUNT, DEFAULT_MIN_SCORE)
+        save_scheduler_run("success", to_storage_time(started_at), to_storage_time(now_kst()), "auto refresh completed", trade_date, payload["created_at"])
     except Exception as exc:
-        save_scheduler_run("error", started, to_storage_time(now_kst()), str(exc), trade_date, None)
+        save_scheduler_run("failed", to_storage_time(started_at), to_storage_time(now_kst()), str(exc), trade_date)
 
 
 def ensure_scheduler_started() -> BackgroundScheduler:
@@ -471,10 +550,10 @@ def ensure_scheduler_started() -> BackgroundScheduler:
 
 
 def scheduler_status() -> dict[str, Any]:
-    status = load_latest_scheduler_run() or {"status": "idle", "finished_at": None, "message": ""}
+    payload = load_latest_scheduler_run() or {"status": "idle", "finished_at": None, "message": ""}
     job = ensure_scheduler_started().get_job(JOB_NAME)
-    status["next_run_at"] = to_storage_time(job.next_run_time.astimezone(KST)) if job and job.next_run_time else None
-    return status
+    payload["next_run_at"] = to_storage_time(job.next_run_time.astimezone(KST)) if job and job.next_run_time else None
+    return payload
 
 
 def ensure_initial_briefing() -> dict[str, Any]:
@@ -484,66 +563,68 @@ def ensure_initial_briefing() -> dict[str, Any]:
 
 def render_ui(briefing: dict[str, Any], status: dict[str, Any]) -> None:
     st.title(PAGE_TITLE)
-
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Trade date", briefing["trade_date"])
-    c2.metric("Created", to_display_time(briefing["created_at"]))
-    c3.metric("Candidates", len(briefing["recommendations"]))
-    c4.metric("Min score", f"{briefing['min_score']:.0f}")
+    c1.metric("거래일", briefing["trade_date"])
+    c2.metric("생성 시각", to_display_time(briefing["created_at"]))
+    c3.metric("추천 종목 수", len(briefing["recommendations"]))
+    c4.metric("최소 점수", f"{briefing['min_score']:.0f}")
 
     s1, s2, s3 = st.columns(3)
-    s1.metric("Scheduler", status.get("status", "idle"))
-    s2.metric("Last run", to_display_time(status.get("finished_at")))
-    s3.metric("Next run", to_display_time(status.get("next_run_at")))
+    s1.metric("스케줄러", status.get("status", "idle"))
+    s2.metric("최근 실행", to_display_time(status.get("finished_at")))
+    s3.metric("다음 실행", to_display_time(status.get("next_run_at")))
 
-    st.subheader("Top picks")
+    st.subheader("상위 추천 종목")
     if not briefing["recommendations"]:
-        st.info("No recommendation for current threshold")
+        st.info("현재 점수 기준을 만족하는 추천 종목이 없습니다.")
     for item in briefing["recommendations"][:3]:
-        st.markdown(f"**{item['ticker_name']} ({item['ticker']})** - score {item['total_score']:.1f}")
-        st.write(f"Buy range: {item['buy_min']:,.0f} - {item['buy_max']:,.0f} | Stop: {item['stop_loss']:,.0f}")
+        st.markdown(f"**{item['ticker_name']} ({item['ticker']})** - 점수 {item['total_score']:.1f} - 상태 {item['status']}")
+        st.write(f"매수 범위: {item['buy_min']:,.0f} - {item['buy_max']:,.0f}, 손절가: {item['stop_loss']:,.0f}")
         if item.get("material_reasons"):
-            st.caption("Reasons: " + " | ".join(item["material_reasons"][:3]))
+            st.caption("점수 반영 사유: " + " | ".join(item["material_reasons"]))
 
-    st.subheader("Collected news")
-    rows = briefing.get("collected_news", [])[:30]
-    if rows:
+    st.subheader("수집된 뉴스")
+    news_rows = briefing.get("collected_news", [])[:30]
+    if news_rows:
         st.dataframe(
-            pd.DataFrame([
-                {
-                    "time": to_display_time(x["published_at"]),
-                    "strength": x["news_strength"],
-                    "source": x["source"],
-                    "ticker": ",".join(x.get("related_tickers", [])),
-                    "title": x["title"],
-                }
-                for x in rows
-            ]),
+            pd.DataFrame(
+                [
+                    {
+                        "time": to_display_time(item["published_at"]),
+                        "strength": item["news_strength"],
+                        "source": item["source"],
+                        "ticker": ",".join(item.get("related_tickers", [])),
+                        "title": item["title"],
+                    }
+                    for item in news_rows
+                ]
+            ),
             use_container_width=True,
             hide_index=True,
         )
     else:
-        st.write("No collected news")
+        st.write("표시할 뉴스가 없습니다.")
 
-    st.subheader("Score review")
-    review = briefing.get("score_review", [])
-    if review:
+    st.subheader("점수 반영 내역")
+    review_rows = briefing.get("score_review", [])
+    if review_rows:
         st.dataframe(
-            pd.DataFrame([
-                {
-                    "rank": x["rank"],
-                    "name": x["ticker_name"],
-                    "ticker": x["ticker"],
-                    "total": x["total_score"],
-                    "material": x["material_score"],
-                    "flow": x["money_flow_score"],
-                    "setup": x["setup_score"],
-                    "risk": x["risk_penalty"],
-                    "change_rate": x["change_rate"],
-                    "reason": x["reason_text"],
-                }
-                for x in review
-            ]),
+            pd.DataFrame(
+                [
+                    {
+                        "rank": row["rank"],
+                        "name": row["ticker_name"],
+                        "ticker": row["ticker"],
+                        "total": row["total_score"],
+                        "material": row["material_score"],
+                        "flow": row["money_flow_score"],
+                        "setup": row["setup_score"],
+                        "risk": row["risk_penalty"],
+                        "change_rate": row["change_rate"],
+                    }
+                    for row in review_rows
+                ]
+            ),
             use_container_width=True,
             hide_index=True,
         )
@@ -553,16 +634,14 @@ def main() -> None:
     st.set_page_config(page_title=PAGE_TITLE, page_icon=":chart_with_upwards_trend:", layout="wide")
     init_db()
     ensure_scheduler_started()
-
     if "briefing" not in st.session_state:
         st.session_state["briefing"] = ensure_initial_briefing()
 
-    st.sidebar.header("Controls")
+    st.sidebar.header("설정")
     candidate_limit = st.sidebar.number_input("candidate_limit", min_value=1, max_value=5, value=DEFAULT_CANDIDATE_COUNT, step=1)
     min_score = st.sidebar.slider("min_score", min_value=50, max_value=90, value=DEFAULT_MIN_SCORE, step=1)
-
-    if st.sidebar.button("refresh briefing", use_container_width=True):
-        with st.spinner("Collecting market and news"):
+    if st.sidebar.button("브리핑 새로고침", use_container_width=True):
+        with st.spinner("시장/뉴스 수집 중..."):
             st.session_state["briefing"] = generate_briefing(int(candidate_limit), float(min_score))
         st.rerun()
 
