@@ -562,72 +562,194 @@ def ensure_initial_briefing() -> dict[str, Any]:
 
 
 def render_ui(briefing: dict[str, Any], status: dict[str, Any]) -> None:
-    st.title(PAGE_TITLE)
+    st.markdown(
+        """
+        <style>
+        .stApp {
+            background: linear-gradient(135deg, #f8fafc 0%, #eef2ff 58%, #ecfeff 100%);
+        }
+        .hero {
+            padding: 18px 22px;
+            border-radius: 16px;
+            background: linear-gradient(120deg, #0f172a 0%, #1e293b 55%, #0f766e 100%);
+            color: #f8fafc;
+            margin-bottom: 16px;
+            box-shadow: 0 12px 30px rgba(15, 23, 42, 0.2);
+        }
+        .hero-title {
+            font-size: 34px;
+            font-weight: 800;
+            letter-spacing: -0.02em;
+            margin-bottom: 5px;
+        }
+        .hero-sub {
+            font-size: 14px;
+            opacity: 0.9;
+        }
+        .kpi-card {
+            border: 1px solid #e5e7eb;
+            border-radius: 14px;
+            padding: 14px 16px;
+            background: #ffffff;
+            box-shadow: 0 8px 18px rgba(15, 23, 42, 0.06);
+            margin-bottom: 10px;
+        }
+        .kpi-label {
+            font-size: 12px;
+            color: #64748b;
+            margin-bottom: 6px;
+        }
+        .kpi-value {
+            font-size: 30px;
+            font-weight: 700;
+            color: #0f172a;
+            line-height: 1.1;
+        }
+        .status-ok {
+            color: #16a34a;
+            font-weight: 700;
+        }
+        .status-idle {
+            color: #2563eb;
+            font-weight: 700;
+        }
+        .pick-card {
+            border: 1px solid #e5e7eb;
+            border-left: 6px solid #2563eb;
+            border-radius: 12px;
+            padding: 14px 14px 10px 14px;
+            background: #ffffff;
+            margin-bottom: 12px;
+        }
+        .pick-title {
+            font-size: 20px;
+            font-weight: 700;
+            color: #0f172a;
+            margin-bottom: 6px;
+        }
+        .pick-meta {
+            font-size: 14px;
+            color: #374151;
+            margin-bottom: 8px;
+        }
+        .pick-range {
+            font-size: 16px;
+            color: #0f172a;
+            font-weight: 600;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown(
+        f"""
+        <div class="hero">
+          <div class="hero-title">{PAGE_TITLE}</div>
+          <div class="hero-sub">실시간 뉴스와 점수 반영 근거를 한눈에 보는 장전 대시보드</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("거래일", briefing["trade_date"])
-    c2.metric("생성 시각", to_display_time(briefing["created_at"]))
-    c3.metric("추천 종목 수", len(briefing["recommendations"]))
-    c4.metric("최소 점수", f"{briefing['min_score']:.0f}")
+    c1.markdown(
+        f'<div class="kpi-card"><div class="kpi-label">거래일</div><div class="kpi-value">{briefing["trade_date"]}</div></div>',
+        unsafe_allow_html=True,
+    )
+    c2.markdown(
+        f'<div class="kpi-card"><div class="kpi-label">생성 시각</div><div class="kpi-value">{to_display_time(briefing["created_at"])}</div></div>',
+        unsafe_allow_html=True,
+    )
+    c3.markdown(
+        f'<div class="kpi-card"><div class="kpi-label">추천 종목 수</div><div class="kpi-value">{len(briefing["recommendations"])}</div></div>',
+        unsafe_allow_html=True,
+    )
+    c4.markdown(
+        f'<div class="kpi-card"><div class="kpi-label">최소 점수</div><div class="kpi-value">{briefing["min_score"]:.0f}</div></div>',
+        unsafe_allow_html=True,
+    )
 
+    scheduler_label = str(status.get("status", "idle"))
+    scheduler_class = "status-ok" if scheduler_label.lower() == "success" else "status-idle"
     s1, s2, s3 = st.columns(3)
-    s1.metric("스케줄러", status.get("status", "idle"))
-    s2.metric("최근 실행", to_display_time(status.get("finished_at")))
-    s3.metric("다음 실행", to_display_time(status.get("next_run_at")))
+    s1.markdown(
+        f'<div class="kpi-card"><div class="kpi-label">스케줄러</div><div class="kpi-value {scheduler_class}">{scheduler_label}</div></div>',
+        unsafe_allow_html=True,
+    )
+    s2.markdown(
+        f'<div class="kpi-card"><div class="kpi-label">최근 실행</div><div class="kpi-value">{to_display_time(status.get("finished_at"))}</div></div>',
+        unsafe_allow_html=True,
+    )
+    s3.markdown(
+        f'<div class="kpi-card"><div class="kpi-label">다음 실행</div><div class="kpi-value">{to_display_time(status.get("next_run_at"))}</div></div>',
+        unsafe_allow_html=True,
+    )
 
-    st.subheader("상위 추천 종목")
-    if not briefing["recommendations"]:
-        st.info("현재 점수 기준을 만족하는 추천 종목이 없습니다.")
-    for item in briefing["recommendations"][:3]:
-        st.markdown(f"**{item['ticker_name']} ({item['ticker']})** - 점수 {item['total_score']:.1f} - 상태 {item['status']}")
-        st.write(f"매수 범위: {item['buy_min']:,.0f} - {item['buy_max']:,.0f}, 손절가: {item['stop_loss']:,.0f}")
-        if item.get("material_reasons"):
-            st.caption("점수 반영 사유: " + " | ".join(item["material_reasons"]))
+    tab1, tab2, tab3 = st.tabs(["상위 추천", "수집 뉴스", "점수 반영"])
 
-    st.subheader("수집된 뉴스")
-    news_rows = briefing.get("collected_news", [])[:30]
-    if news_rows:
-        st.dataframe(
-            pd.DataFrame(
-                [
-                    {
-                        "time": to_display_time(item["published_at"]),
-                        "strength": item["news_strength"],
-                        "source": item["source"],
-                        "ticker": ",".join(item.get("related_tickers", [])),
-                        "title": item["title"],
-                    }
-                    for item in news_rows
-                ]
-            ),
-            use_container_width=True,
-            hide_index=True,
-        )
-    else:
-        st.write("표시할 뉴스가 없습니다.")
+    with tab1:
+        if not briefing["recommendations"]:
+            st.info("현재 점수 기준을 만족하는 추천 종목이 없습니다.")
+        for item in briefing["recommendations"][:3]:
+            reasons = " | ".join(item.get("material_reasons", [])[:3]) or "반영 사유 없음"
+            st.markdown(
+                f"""
+                <div class="pick-card">
+                  <div class="pick-title">{item['ticker_name']} ({item['ticker']})</div>
+                  <div class="pick-meta">점수 {item['total_score']:.1f} | 상태 {item['status']}</div>
+                  <div class="pick-range">매수 {item['buy_min']:,.0f} ~ {item['buy_max']:,.0f} / 손절 {item['stop_loss']:,.0f}</div>
+                  <div class="pick-meta" style="margin-top:8px;">점수 반영 사유: {reasons}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
-    st.subheader("점수 반영 내역")
-    review_rows = briefing.get("score_review", [])
-    if review_rows:
-        st.dataframe(
-            pd.DataFrame(
-                [
-                    {
-                        "rank": row["rank"],
-                        "name": row["ticker_name"],
-                        "ticker": row["ticker"],
-                        "total": row["total_score"],
-                        "material": row["material_score"],
-                        "flow": row["money_flow_score"],
-                        "setup": row["setup_score"],
-                        "risk": row["risk_penalty"],
-                        "change_rate": row["change_rate"],
-                    }
-                    for row in review_rows
-                ]
-            ),
-            use_container_width=True,
-            hide_index=True,
-        )
+    with tab2:
+        news_rows = briefing.get("collected_news", [])[:40]
+        if news_rows:
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        {
+                            "시각": to_display_time(item["published_at"]),
+                            "강도": item["news_strength"],
+                            "출처": item["source"],
+                            "종목": ",".join(item.get("related_tickers", [])),
+                            "제목": item["title"],
+                        }
+                        for item in news_rows
+                    ]
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+        else:
+            st.write("표시할 뉴스가 없습니다.")
+
+    with tab3:
+        review_rows = briefing.get("score_review", [])
+        if review_rows:
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        {
+                            "순위": row["rank"],
+                            "종목명": row["ticker_name"],
+                            "티커": row["ticker"],
+                            "총점": row["total_score"],
+                            "재료": row["material_score"],
+                            "수급": row["money_flow_score"],
+                            "셋업": row["setup_score"],
+                            "리스크": row["risk_penalty"],
+                            "등락률": row["change_rate"],
+                        }
+                        for row in review_rows
+                    ]
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
 
 
 def main() -> None:
