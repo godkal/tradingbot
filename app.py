@@ -1,27 +1,422 @@
 from __future__ import annotations
 
-import base64
-import io
+import json
+import os
+import sqlite3
+import threading
+import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import asdict, dataclass
+from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
+from html import unescape
 from pathlib import Path
-import zipfile
+from typing import Any
+from urllib.parse import quote_plus
 
-ARCHIVE_B64 = """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"""
-
-
-def ensure_project_files() -> None:
-    base_dir = Path(__file__).resolve().parent
-    archive = base64.b64decode(ARCHIVE_B64)
-    with zipfile.ZipFile(io.BytesIO(archive)) as zf:
-        for member in zf.infolist():
-            target = base_dir / member.filename
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(zf.read(member.filename))
+import FinanceDataReader as fdr
+import pandas as pd
+import requests
+import streamlit as st
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.interval import IntervalTrigger
 
 
-ensure_project_files()
+KST = timezone(timedelta(hours=9))
+PAGE_TITLE = "장전 단타 브리핑"
+DEFAULT_MIN_SCORE = 63
+DEFAULT_CANDIDATE_COUNT = 3
+DEFAULT_REFRESH_HOURS = 3
+JOB_NAME = "briefing_refresh"
+DB_PATH = Path(os.getenv("APP_DB_PATH", str(Path(__file__).resolve().parent / "data" / "app.db")))
 
-from app_main import main
+_scheduler: BackgroundScheduler | None = None
+_scheduler_lock = threading.Lock()
 
 
-if __name__ == "__main__":
-    main()
+@dataclass(slots=True)
+class Snapshot:
+    ticker: str
+    name: str
+    close_price: float
+    change_rate: float
+    volume: float
+    trading_value: float
+    high_price: float
+    low_price: float
+    open_price: float
+
+
+@dataclass(slots=True)
+class NewsItem:
+    title: str
+    source: str
+    summary: str
+    published_at: datetime
+    related_tickers: list[str]
+    news_strength: float
+    url: str
+
+
+@dataclass(slots=True)
+class DisclosureItem:
+    corp_name: str
+    ticker: str
+    title: str
+    category: str
+    published_at: datetime
+    disclosure_strength: float
+
+
+@dataclass(slots=True)
+class ScoreRow:
+    ticker: str
+    ticker_name: str
+    material_score: float
+    money_flow_score: float
+    setup_score: float
+    risk_penalty: float
+    total_score: float
+    reason_text: str
+    score_breakdown: dict[str, float]
+    material_reasons: list[str]
+    risk_notes: list[str]
+
+
+SAMPLE_MARKET_ROWS = [
+    ("005930", "삼성전자", 84500, 3.1, 18_200_000, 1_520_000_000_000, 84800, 82100, 82600),
+    ("042660", "한화오션", 31250, 11.6, 4_850_000, 149_000_000_000, 31700, 28350, 28650),
+    ("028300", "HLB", 76800, 18.7, 3_920_000, 294_000_000_000, 78100, 64200, 65100),
+    ("000660", "SK하이닉스", 208500, 1.8, 2_640_000, 548_000_000_000, 210000, 203500, 204000),
+]
+
+SAMPLE_NEWS_ROWS = [
+    ("삼성전자 HBM 공급 기대와 AI 메모리 수요 확대", "HBM 공급 수혜와 AI 서버 투자 확대 기대가 이어지고 있습니다.", ["005930"], 8.4),
+    ("한화오션 수주 기대 부각", "방산과 조선 관련 수주 기대가 확산되고 있습니다.", ["042660"], 8.9),
+    ("HLB 신약 기대감 재부각", "바이오 재료가 강하지만 변동성 주의가 필요합니다.", ["028300"], 7.6),
+]
+
+SAMPLE_DISCLOSURES = [
+    ("삼성전자", "005930", "반도체 투자 관련 공시 예시", "투자", 7.4),
+    ("한화오션", "042660", "수주 관련 공시 예시", "수주", 8.8),
+    ("HLB", "028300", "바이오 개발 관련 공시 예시", "바이오", 7.9),
+]
+
+
+def now_kst() -> datetime:
+    return datetime.now(tz=KST)
+
+
+def current_trade_date() -> str:
+    current = now_kst()
+    while current.weekday() >= 5:
+        current -= timedelta(days=1)
+    return current.strftime("%Y-%m-%d")
+
+
+def to_storage_time(value: datetime) -> str:
+    return value.astimezone(KST).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def to_display_time(value: str | datetime | None) -> str:
+    if not value:
+        return "-"
+    parsed = value if isinstance(value, datetime) else datetime.strptime(value, "%Y-%m-%d %H:%M:%S").replace(tzinfo=KST)
+    return parsed.astimezone(KST).strftime("%m-%d %H:%M")
+
+
+def safe_float(value: Any) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def clamp(value: float, lower: float, upper: float) -> float:
+    return max(lower, min(value, upper))
+
+
+def init_db() -> None:
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS briefings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trade_date TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                candidate_limit INTEGER NOT NULL DEFAULT 3,
+                min_score REAL NOT NULL DEFAULT 75,
+                recommended_count INTEGER NOT NULL DEFAULT 0,
+                payload_json TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS scheduler_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_name TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                finished_at TEXT,
+                status TEXT NOT NULL,
+                message TEXT,
+                trade_date TEXT,
+                briefing_created_at TEXT
+            );
+            """
+        )
+        conn.commit()
+
+
+def save_briefing(payload: dict[str, Any]) -> None:
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            INSERT INTO briefings (
+                trade_date, created_at, candidate_limit, min_score, recommended_count, payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                payload["trade_date"],
+                payload["created_at"],
+                payload["candidate_limit"],
+                payload["min_score"],
+                len(payload["recommendations"]),
+                json.dumps(payload, ensure_ascii=False),
+            ),
+        )
+        conn.commit()
+
+
+def load_latest_briefing() -> dict[str, Any] | None:
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute("SELECT payload_json FROM briefings ORDER BY created_at DESC LIMIT 1").fetchone()
+    return json.loads(row[0]) if row else None
+
+
+def load_latest_briefing_for_trade_date(trade_date: str) -> dict[str, Any] | None:
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT payload_json FROM briefings WHERE trade_date = ? ORDER BY created_at DESC LIMIT 1",
+            (trade_date,),
+        ).fetchone()
+    return json.loads(row[0]) if row else None
+
+
+def save_scheduler_run(status: str, started_at: str, finished_at: str | None, message: str, trade_date: str, briefing_created_at: str | None = None) -> None:
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            INSERT INTO scheduler_runs (
+                job_name, started_at, finished_at, status, message, trade_date, briefing_created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (JOB_NAME, started_at, finished_at, status, message, trade_date, briefing_created_at),
+        )
+        conn.commit()
+
+
+def load_latest_scheduler_run() -> dict[str, Any] | None:
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM scheduler_runs WHERE job_name = ? ORDER BY started_at DESC LIMIT 1",
+            (JOB_NAME,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def build_news_search_url(keyword: str) -> str:
+    return f"https://search.naver.com/search.naver?where=news&query={quote_plus(keyword)}"
+
+
+def google_rss_url(query: str) -> str:
+    return f"https://news.google.com/rss/search?q={quote_plus(query)}&hl=ko&gl=KR&ceid=KR:ko"
+
+
+def collect_market_data(limit: int = 60) -> tuple[list[Snapshot], str]:
+    try:
+        listing = fdr.StockListing("KRX")
+        listing = listing[listing["Market"].isin(["KOSPI", "KOSDAQ"])].copy()
+        listing["Amount"] = listing["Amount"].fillna(0)
+        listing["Volume"] = listing["Volume"].fillna(0)
+        listing["ChagesRatio"] = listing["ChagesRatio"].fillna(0)
+        rows = listing[
+            (listing["Amount"] > 10_000_000_000)
+            & (listing["Volume"] > 100_000)
+            & (listing["ChagesRatio"] > 0)
+        ].sort_values(["Amount", "ChagesRatio"], ascending=[False, False]).head(limit)
+        snapshots = [
+            Snapshot(
+                ticker=str(row["Code"]).zfill(6),
+                name=str(row["Name"]),
+                close_price=safe_float(row.get("Close")),
+                change_rate=safe_float(row.get("ChagesRatio")),
+                volume=safe_float(row.get("Volume")),
+                trading_value=safe_float(row.get("Amount")),
+                high_price=safe_float(row.get("High")),
+                low_price=safe_float(row.get("Low")),
+                open_price=safe_float(row.get("Open")),
+            )
+            for row in rows.to_dict("records")
+        ]
+        if snapshots:
+            return snapshots, "actual"
+    except Exception:
+        pass
+    return [
+        Snapshot(*row)
+        for row in SAMPLE_MARKET_ROWS
+    ], "fallback_sample"
+
+
+def keyword_strength(title: str, summary: str) -> float:
+    text = f"{title} {summary}".lower()
+    score = 6.0
+    for keyword in ["수주", "계약", "실적", "승인", "ai", "hbm", "투자", "신약", "공급", "수혜"]:
+        if keyword in text:
+            score += 0.7
+    return min(score, 9.5)
+
+
+def fetch_news_for_ticker(snapshot: Snapshot, created_at: datetime) -> list[NewsItem]:
+    response = requests.get(google_rss_url(f'"{snapshot.name}" when:1d'), headers={"User-Agent": "Mozilla/5.0"}, timeout=8)
+    response.raise_for_status()
+    root = ET.fromstring(response.text)
+    items: list[NewsItem] = []
+    for row in root.findall(".//item")[:2]:
+        title = unescape(row.findtext("title", default="")).strip()
+        if not title:
+            continue
+        summary = unescape(row.findtext("description", default="")).strip()
+        pub_date = row.findtext("pubDate", default="")
+        published_at = parsedate_to_datetime(pub_date) if pub_date else created_at
+        items.append(
+            NewsItem(
+                title=title,
+                source="Google News RSS",
+                summary=summary or f"{snapshot.name} 관�h 뉴스",
+                published_at=published_at.astimezone(KST),
+                related_tickers=[snapshot.ticker],
+                news_strength=keyword_strength(title, summary),
+                url=row.findtext("link", default="").strip(),
+            )
+        )
+    return items
+
+
+def collect_news(snapshots: list[Snapshot], max_tickers: int = 15) -> tuple[list[NewsItem], str]:
+    created_at = now_kst()
+    candidates = snapshots[:max_tickers]
+    try:
+        collected: list[NewsItem] = []
+        with ThreadPoolExecutor(max_workers=min(6, len(candidates)) or 1) as executor:
+            futures = [executor.submit(fetch_news_for_ticker, snapshot, created_at) for snapshot in candidates]
+            for future in as_completed(futures):
+                try:
+                    collected.extend(future.result())
+                except Exception:
+                    continue
+        if collected:
+            return collected, "actual"
+    except Exception:
+        pass
+    return [
+        NewsItem(
+            title=title,
+            source="Sample",
+            summary=summary,
+            published_at=created_at - timedelta(minutes=index * 15),
+            related_tickers=tickers,
+            news_strength=strength,
+            url=build_news_search_url(title),
+        )
+        for index, (title, summary, tickers, strength) in enumerate(SAMPLE_NEWS_ROWS)
+    ], "fallback_sample"
+
+
+def collect_disclosures(trade_date: str, tickers: set[str]) -> tuple[list[DisclosureItem], str]:
+    api_key = os.getenv("DART_API_KEY", "").strip()
+    created_at = now_kst()
+    if not api_key:
+        return [
+            DisclosureItem(corp_name, ticker, title, category, created_at - timedelta(minutes=index * 20), strength)
+            for index, (corp_name, ticker, title, category, strength) in enumerate(SAMPLE_DISCLOSURES)
+            if ticker in tickers
+        ], "fallback_sample"
+    try:
+        response = requests.get(
+            "https://opendart.fss.or.kr/api/list.json",
+            params={
+                "crtfc_key": api_key,
+                "bgn_de": trade_date.replace("-", ""),
+                "end_de": trade_date.replace("-", ""),
+                "corp_cls": "Y",
+                "sort": "date",
+                "sort_mth": "desc",
+                "page_count": "100",
+            },
+            timeout=20,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if payload.get("status") != "000":
+            return [], "actual_empty"
+        rows: list[DisclosureItem] = []
+        for item in payload.get("list", []):
+            ticker = str(item.get("stock_code", "")).zfill(6)
+            if not ticker or ticker not in tickers:
+                continue
+            title = str(item.get("report_nm", ""))
+            strength = 6.5
+            for keyword in ["계약", "수주", "취득", "양수", "투자", "승인", "합병", "영업이익"]:
+                if keyword in title:
+                    strength += 0.8
+            rows.append(
+                DisclosureItem(
+                    corp_name=str(item.get("corp_name", "")),
+                    ticker=ticker,
+                    title=title,
+                    category="공시",
+                    published_at=created_at,
+                    disclosure_strength=min(strength, 9.5),
+                )
+            )
+        return rows, "actual" if rows else "actual_empty"
+    except Exception:
+        return [], "disabled"
+
+
+def build_news_strength_map(news_items: list[NewsItem]) -> dict[str, dict[str, Any]]:
+    grouped: dict[str, dict[str, Any]] = {}
+    for item in news_items:
+        payload = {
+            "title": item.title,
+            "source": item.source,
+            "summary": item.summary,
+            "published_at": to_storage_time(item.published_at),
+            "news_strength": item.news_strength,
+            "url": item.url,
+        }
+        for ticker in item.related_tickers:
+            row = grouped.setdefault(ticker, {"max_strength": 0.0, "spread_count": 0, "items": []})
+            row["max_strength"] = max(row["max_strength"], item.news_strength)
+            row["spread_count"] += 1
+            row["items"].append(payload)
+    return grouped
+
+
+def build_disclosure_strength_map(disclosures: list[DisclosureItem]) -> dict[str, dict[str, Any]]:
+    grouped: dict[str, dict[str, Any]] = {}
+    for item in disclosures:
+        row = grouped.setdefault(item.ticker, {"max_strength": 0.0, "items": []})
+        row["max_strength"] = max(row["max_strength"], item.disclosure_strength)
+        row["items"].append(
+            {
+                "corp_name": item.corp_name,
+                "title": item.title,
+                "category": item.category,
+                "published_at": to_storage_time(item.published_at),
+                "disclosure_strength": item.disclosure_strength,
+            }
+        )
+    return grouped
+
+   
